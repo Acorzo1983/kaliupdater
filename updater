@@ -1,0 +1,115 @@
+#!/bin/bash
+
+# Kali Updater tool made with ❤️ by Albert C
+
+# Log file (incremental)
+LOGFILE="/var/log/updater.log"
+echo -e "\n--- Update started on $(date) ---\n" | sudo tee -a "$LOGFILE"
+
+# Check for sudo permissions
+if [ "$EUID" -ne 0 ]; then
+    echo -e "\e[1;31mPlease run this script as root or with sudo.\e[0m" | sudo tee -a "$LOGFILE"
+    echo -e "\e[1;33mLog saved to: $LOGFILE\e[0m"
+    exit 1
+fi
+
+# Function to handle errors
+handle_error() {
+    echo -e "\e[1;31mError: $1\e[0m" | sudo tee -a "$LOGFILE"
+    echo -e "\e[1;33mAttempting to fix broken dependencies...\e[0m" | sudo tee -a "$LOGFILE"
+    sudo apt --fix-broken install -y | sudo tee -a "$LOGFILE"
+    if [ $? -ne 0 ]; then
+        echo -e "\e[1;31mFailed to fix dependencies. Exiting.\e[0m" | sudo tee -a "$LOGFILE"
+        echo -e "\e[1;33mLog saved to: $LOGFILE\e[0m"
+        exit 1
+    fi
+}
+
+# Function to update package list
+update_package_list() {
+    echo -e "\e[1;33mUpdating package list...\e[0m" | sudo tee -a "$LOGFILE"
+    sudo apt-get update --fix-missing | sudo tee -a "$LOGFILE"
+    if [ $? -eq 0 ]; then
+        echo -e "\e[1;32mPackage list updated successfully.\e[0m\n" | sudo tee -a "$LOGFILE"
+    else
+        handle_error "Failed to update package list."
+    fi
+}
+
+# Function to perform full upgrade
+full_upgrade() {
+    echo -e "\e[1;33mPerforming full upgrade...\e[0m" | sudo tee -a "$LOGFILE"
+    sudo apt-get full-upgrade -y | sudo tee -a "$LOGFILE"
+    if [ $? -eq 0 ]; then
+        echo -e "\e[1;32mFull upgrade completed successfully.\e[0m\n" | sudo tee -a "$LOGFILE"
+    else
+        handle_error "Failed to perform full upgrade."
+    fi
+}
+
+# Function to clean the system
+clean_system() {
+    echo -e "\e[1;33mRemoving unnecessary packages...\e[0m" | sudo tee -a "$LOGFILE"
+    sudo apt-get autoremove -y | sudo tee -a "$LOGFILE"
+    if [ $? -eq 0 ]; then
+        echo -e "\e[1;32mUnnecessary packages removed successfully.\e[0m\n" | sudo tee -a "$LOGFILE"
+    else
+        handle_error "Failed to remove unnecessary packages."
+    fi
+
+    echo -e "\e[1;33mCleaning up old downloaded packages...\e[0m" | sudo tee -a "$LOGFILE"
+    sudo apt-get autoclean -y | sudo tee -a "$LOGFILE"
+    if [ $? -eq 0 ]; then
+        echo -e "\e[1;32mCleanup of old packages completed.\e[0m\n" | sudo tee -a "$LOGFILE"
+    else
+        handle_error "Failed to clean up old packages."
+    fi
+}
+
+# Display custom header
+echo -e "\e[1;35m========================================\e[0m"
+echo -e "\e[1;35m   Kali Updater tool made with ❤️ by Albert C   \e[0m"
+echo -e "\e[1;35m========================================\e[0m\n"
+
+# Interactive menu
+while true; do
+    echo -e "\e[1;34mSelect an option:\e[0m"
+    echo -e "1. Full update (update, upgrade, and clean)"
+    echo -e "2. Update package list only"
+    echo -e "3. Clean system (remove unnecessary packages and clean cache)"
+    echo -e "4. Exit"
+    read -p "Enter your choice (1-4): " choice
+
+    case $choice in
+        1)
+            echo -e "\e[1;36mStarting full update...\e[0m" | sudo tee -a "$LOGFILE"
+            update_package_list
+            full_upgrade
+            clean_system
+            ;;
+        2)
+            echo -e "\e[1;36mUpdating package list only...\e[0m" | sudo tee -a "$LOGFILE"
+            update_package_list
+            ;;
+        3)
+            echo -e "\e[1;36mCleaning the system...\e[0m" | sudo tee -a "$LOGFILE"
+            clean_system
+            ;;
+        4)
+            echo -e "\e[1;32mExiting the script. Goodbye!\e[0m" | sudo tee -a "$LOGFILE"
+            break
+            ;;
+        *)
+            echo -e "\e[1;31mInvalid choice. Please select a valid option (1-4).\e[0m" | sudo tee -a "$LOGFILE"
+            ;;
+    esac
+done
+
+# Check if a reboot is required
+if [ -f /var/run/reboot-required ]; then
+    echo -e "\e[1;33mA reboot is required to complete the update.\e[0m" | sudo tee -a "$LOGFILE"
+fi
+
+# Final message with log location
+echo -e "\e[1;33mLog saved to: $LOGFILE\e[0m" | sudo tee -a "$LOGFILE"
+echo -e "--- Update finished on $(date) ---\n" | sudo tee -a "$LOGFILE"
