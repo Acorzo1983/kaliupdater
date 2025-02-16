@@ -67,9 +67,9 @@ clean_system() {
 }
 
 # Display custom header
-echo -e "\e[1;35m========================================\e[0m"
-echo -e "\e[1;35m   Kali Updater tool made with ❤️ by Albert C   \e[0m"
-echo -e "\e[1;35m========================================\e[0m\n"
+echo -e "\e[1;35m==============================================\e[0m"
+echo -e "\e[1;35m  Kali Updater tool made with ❤️ by Albert C  \e[0m"
+echo -e "\e[1;35m===============================================\e[0m\n"
 
 # Interactive menu
 while true; do
