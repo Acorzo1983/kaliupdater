@@ -1,115 +1,326 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Kali Updater tool made with ❤️ by Albert C
+#
+# Kali Updater Tool - v3.1 - Hardened Edition
+#
+# Changelog v3.1:
+# - Corrected execution order: check for root privileges before attempting to write logfile.
+#
+# Changelog v3.0:
+# - Added dependency check for required tools.
+# - Centralized logging function with timestamps and levels (INFO, WARN, ERROR).
+# - Implemented `trap` for safe cleanup on script exit/error.
+# - Added explicit kernel update detection.
+# - Added a --help/-h flag for usage instructions.
+# - Standardized on `apt-get` for script reliability.
 
-# Log file (incremental)
-LOGFILE="/var/log/updater.log"
-echo -e "\n--- Update started on $(date) ---\n" | sudo tee -a "$LOGFILE"
+# --- Configuration and Setup ---
+# Strict mode: exit on error, on unset variable, and pipe failure
+set -euo pipefail
 
-# Check for sudo permissions
-if [ "$EUID" -ne 0 ]; then
-    echo -e "\e[1;31mPlease run this script as root or with sudo.\e[0m" | sudo tee -a "$LOGFILE"
-    echo -e "\e[1;33mLog saved to: $LOGFILE\e[0m"
-    exit 1
-fi
+# Log file configuration
+readonly LOGFILE="/var/log/kali-updater.log"
 
-# Function to handle errors
-handle_error() {
-    echo -e "\e[1;31mError: $1\e[0m" | sudo tee -a "$LOGFILE"
-    echo -e "\e[1;33mAttempting to fix broken dependencies...\e[0m" | sudo tee -a "$LOGFILE"
-    sudo apt --fix-broken install -y | sudo tee -a "$LOGFILE"
-    if [ $? -ne 0 ]; then
-        echo -e "\e[1;31mFailed to fix dependencies. Exiting.\e[0m" | sudo tee -a "$LOGFILE"
-        echo -e "\e[1;33mLog saved to: $LOGFILE\e[0m"
+# Colors for output
+readonly RED='\e[1;31m'
+readonly YELLOW='\e[1;33m'
+readonly GREEN='\e[1;32m'
+readonly CYAN='\e[1;36m'
+readonly NC='\e[0m' # No Color
+
+# --- Core Functions ---
+
+# Centralized logging function
+# Usage: log_msg <LEVEL> "Message"
+log_msg() {
+    local level="$1"
+    local message="$2"
+    local color="$NC"
+    
+    case "$level" in
+        INFO) color="$GREEN" ;;
+        WARN) color="$YELLOW" ;;
+        ERROR) color="$RED" ;;
+        *) level="STATUS"; color="$CYAN" ;;
+    esac
+    
+    # Format: [YYYY-MM-DD HH:MM:SS] [LEVEL] Message
+    local formatted_message
+    formatted_message=$(printf "[%(%F %T)T] [%s] %s\n" -1 "$level" "$message")
+    
+    echo -e "${color}${formatted_message}${NC}"
+}
+
+# Cleanup function executed on script exit
+cleanup() {
+    # Only print the "finished" message if the script wasn't terminated by the root check
+    if [[ $EUID -eq 0 ]]; then
+        log_msg INFO "Update script finished. Log available at $LOGFILE"
+    fi
+}
+
+# Function to display usage instructions
+usage() {
+    echo -e "${CYAN}Kali Updater Tool v3.1${NC}"
+    echo "Usage: $0 [ACTION] [OPTIONS]"
+    echo
+    echo "Actions (use one):"
+    echo "  --full              Run the complete update, upgrade, and clean process."
+    echo "  --update            Only update the package list."
+    echo "  --clean             Clean the system (autoremove, autoclean)."
+    echo "  --reinstall-apt     Reinstall core APT components."
+    echo "  --refresh-key       Manually refresh the Kali GPG key."
+    echo
+    echo "Options:"
+    echo "  --force             Force kill existing APT processes if they are locked."
+    echo "  --no-menu           Run directly based on the action flag (required for automation)."
+    echo "  -h, --help          Display this help message."
+    echo
+    echo "Example (automated full update): sudo $0 --no-menu --full"
+}
+
+# --- System Check and Preparation Functions ---
+
+# Verify that all required dependencies are installed
+check_dependencies() {
+    log_msg INFO "Checking for required dependencies..."
+    local dependencies=("curl" "gpg" "fuser" "tee")
+    local missing_deps=()
+    for dep in "${dependencies[@]}"; do
+        if ! command -v "$dep" &>/dev/null; then
+            missing_deps+=("$dep")
+        fi
+    done
+    
+    if [ ${#missing_deps[@]} -ne 0 ]; then
+        log_msg ERROR "Missing dependencies: ${missing_deps[*]}. Please install them and retry."
         exit 1
     fi
+    log_msg INFO "All dependencies are present."
 }
 
-# Function to update package list
-update_package_list() {
-    echo -e "\e[1;33mUpdating package list...\e[0m" | sudo tee -a "$LOGFILE"
-    sudo apt-get update --fix-missing | sudo tee -a "$LOGFILE"
-    if [ $? -eq 0 ]; then
-        echo -e "\e[1;32mPackage list updated successfully.\e[0m\n" | sudo tee -a "$LOGFILE"
+# Refresh Kali's GPG archive key
+refresh_kali_key() {
+    log_msg WARN "Refreshing Kali GPG archive key..."
+    if curl -fsSL https://archive.kali.org/archive-key.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/kali-archive-keyring.gpg; then
+        log_msg INFO "GPG key refreshed successfully."
+        return 0
     else
-        handle_error "Failed to update package list."
+        log_msg ERROR "Failed to refresh GPG key."
+        return 1
     fi
 }
 
-# Function to perform full upgrade
-full_upgrade() {
-    echo -e "\e[1;33mPerforming full upgrade...\e[0m" | sudo tee -a "$LOGFILE"
-    sudo apt-get full-upgrade -y | sudo tee -a "$LOGFILE"
-    if [ $? -eq 0 ]; then
-        echo -e "\e[1;32mFull upgrade completed successfully.\e[0m\n" | sudo tee -a "$LOGFILE"
-    else
-        handle_error "Failed to perform full upgrade."
-    fi
+# Check for and handle existing APT/DPKG locks
+handle_locks() {
+    local force="${1:-0}"
+    local timeout=60
+    local waited=0
+    
+    log_msg INFO "Checking for APT/DPKG locks..."
+    while pgrep -f '(/usr/bin/apt-get|/usr/bin/apt|/usr/bin/dpkg|/usr/bin/unattended-upgrade)' >/dev/null; do
+        if ((waited >= timeout)); then
+            log_msg ERROR "Timeout reached waiting for APT locks to be released."
+            if [[ $force -eq 1 ]]; then
+                log_msg WARN "Forcing lock cleanup as per --force flag."
+                pkill -KILL -f '(/usr/bin/apt-get|/usr/bin/apt|/usr/bin/dpkg|/usr/bin/unattended-upgrade)' || true
+                rm -f /var/lib/dpkg/lock* /var/cache/apt/archives/lock
+                log_msg INFO "Killed processes and removed lock files."
+                break
+            else
+                log_msg ERROR "APT is locked. Rerun with --force to attempt cleanup, or resolve manually."
+                return 1
+            fi
+        fi
+        log_msg WARN "APT is locked. Waiting... ($waited/$timeout s)"
+        sleep 5
+        waited=$((waited + 5))
+    done
+    log_msg INFO "APT locks are clear."
 }
 
-# Function to clean the system
+# --- Core APT Task Functions ---
+
+# Run apt-get update with GPG key refresh as a fallback
+apt_update_resilient() {
+    log_msg INFO "Updating package list..."
+    if ! apt-get update --fix-missing; then
+        log_msg WARN "Initial 'apt-get update' failed. Attempting GPG key refresh..."
+        if refresh_kali_key; then
+            log_msg INFO "Retrying 'apt-get update' after key refresh..."
+            apt-get update --fix-missing
+        else
+            log_msg ERROR "Cannot proceed with update due to key and update failures."
+            return 1
+        fi
+    fi
+    log_msg INFO "Package list updated successfully."
+}
+
+# Run pre-upgrade checks and fixes
+fix_broken_packages() {
+    log_msg INFO "Ensuring DPKG is configured and fixing broken packages..."
+    dpkg --configure -a
+    apt-get -f install -y
+}
+
+# Perform the full system upgrade
+run_full_upgrade() {
+    log_msg INFO "Performing full system upgrade..."
+    apt-get full-upgrade -y
+    log_msg INFO "Full upgrade command finished."
+}
+
+# Clean the system
 clean_system() {
-    echo -e "\e[1;33mRemoving unnecessary packages...\e[0m" | sudo tee -a "$LOGFILE"
-    sudo apt-get autoremove -y | sudo tee -a "$LOGFILE"
-    if [ $? -eq 0 ]; then
-        echo -e "\e[1;32mUnnecessary packages removed successfully.\e[0m\n" | sudo tee -a "$LOGFILE"
-    else
-        handle_error "Failed to remove unnecessary packages."
-    fi
+    log_msg INFO "Removing unnecessary packages (autoremove)..."
+    apt-get autoremove -y
+    log_msg INFO "Cleaning old package cache (autoclean)..."
+    apt-get autoclean -y
+    log_msg INFO "System cleaning complete."
+}
 
-    echo -e "\e[1;33mCleaning up old downloaded packages...\e[0m" | sudo tee -a "$LOGFILE"
-    sudo apt-get autoclean -y | sudo tee -a "$LOGFILE"
-    if [ $? -eq 0 ]; then
-        echo -e "\e[1;32mCleanup of old packages completed.\e[0m\n" | sudo tee -a "$LOGFILE"
+# Reinstall core APT and Python components if needed
+reinstall_apt_stack() {
+    log_msg WARN "Reinstalling core APT/Python stack..."
+    apt-get install --reinstall -y python3-apt command-not-found apt apt-utils
+    log_msg INFO "APT stack reinstallation complete."
+}
+
+# Check if a new kernel was installed, which necessitates a reboot
+check_kernel_update() {
+    log_msg INFO "Checking for kernel updates..."
+    local current_kernel
+    current_kernel=$(uname -r)
+    local installed_kernels
+    installed_kernels=$(dpkg -l | grep 'linux-image-' | awk '{print $2}' | sed 's/linux-image-//')
+    
+    local new_kernel_found=0
+    for k in $installed_kernels; do
+        if [[ "$k" != "$current_kernel" ]]; then
+            log_msg WARN "New kernel ($k) is installed, but the running kernel is $current_kernel."
+            new_kernel_found=1
+            break
+        fi
+    done
+
+    if [[ -f /var/run/reboot-required ]] || [[ $new_kernel_found -eq 1 ]]; then
+        log_msg WARN "A system reboot is required to apply all updates (kernel or other critical services)."
     else
-        handle_error "Failed to clean up old packages."
+        log_msg INFO "No reboot required at this time."
     fi
 }
 
-# Display custom header
-echo -e "\e[1;35m==============================================\e[0m"
-echo -e "\e[1;35m  Kali Updater tool made with ❤️ by Albert C  \e[0m"
-echo -e "\e[1;35m===============================================\e[0m\n"
+# --- Main Execution Logic ---
 
-# Interactive menu
-while true; do
-    echo -e "\e[1;34mSelect an option:\e[0m"
-    echo -e "1. Full update (update, upgrade, and clean)"
-    echo -e "2. Update package list only"
-    echo -e "3. Clean system (remove unnecessary packages and clean cache)"
-    echo -e "4. Exit"
-    read -p "Enter your choice (1-4): " choice
+main() {
+    # --- FIX: Check for root privileges FIRST ---
+    if [[ $EUID -ne 0 ]]; then
+        # Using standard echo here because logging isn't set up yet.
+        echo -e "${RED}[ERROR] This script must be run as root or with sudo.${NC}"
+        exit 1
+    fi
+    
+    # Now that we know we have root, set up logging and traps
+    touch "$LOGFILE" || { echo "FATAL: Cannot write to $LOGFILE. Check permissions."; exit 1; }
+    exec > >(tee -a "$LOGFILE") 2>&1
+    trap cleanup EXIT
+    
+    # The rest of the script continues
+    log_msg INFO "============================================="
+    log_msg INFO "Kali Updater v3.1 Initialized"
+    log_msg INFO "============================================="
+    
+    # Set non-interactive frontend for automated runs
+    export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+    export NEEDRESTART_MODE="${NEEDRESTART_MODE:-a}"
+    export APT_LISTCHANGES_FRONTEND="${APT_LISTCHANGES_FRONTEND:-none}"
 
-    case $choice in
-        1)
-            echo -e "\e[1;36mStarting full update...\e[0m" | sudo tee -a "$LOGFILE"
-            update_package_list
-            full_upgrade
+    # Check dependencies before doing anything else
+    check_dependencies
+
+    # Parse command-line arguments
+    local FORCE=0 NO_MENU=0 ACTION=""
+    if [[ $# -eq 0 ]]; then
+        # No arguments, default to interactive menu
+        NO_MENU=0
+    else
+        # Arguments provided, assume no menu unless explicitly asking for it
+        NO_MENU=1
+        while (($#)); do
+            case "$1" in
+                --force) FORCE=1; shift ;;
+                --no-menu) NO_MENU=1; shift ;;
+                --full) ACTION="full"; shift ;;
+                --update) ACTION="update"; shift ;;
+                --clean) ACTION="clean"; shift ;;
+                --reinstall-apt) ACTION="reinstall"; shift ;;
+                --refresh-key) ACTION="refresh"; shift ;;
+                -h|--help) usage; exit 0 ;;
+                *) log_msg ERROR "Unknown flag: $1"; usage; exit 1 ;;
+            esac
+        done
+    fi
+
+    # --- Action Execution ---
+    
+    # If no action was specified via flags, show the interactive menu
+    if [[ -z "$ACTION" ]] && [[ $NO_MENU -eq 0 ]]; then
+        while true; do
+            echo -e "\n${CYAN}Select an option:${NC}"
+            echo "1. Full update (update, upgrade, and clean)"
+            echo "2. Update package list only"
+            echo "3. Clean system"
+            echo "4. Reinstall APT/Python stack"
+            echo "5. Exit"
+            read -rp "Enter your choice (1-5): " choice
+            
+            case "$choice" in
+                1) ACTION="full"; break ;;
+                2) ACTION="update"; break ;;
+                3) ACTION="clean"; break ;;
+                4) ACTION="reinstall"; break ;;
+                5) exit 0 ;;
+                *) log_msg ERROR "Invalid choice. Please select a valid option." ;;
+            esac
+        done
+    elif [[ -z "$ACTION" ]] && [[ $NO_MENU -eq 1 ]]; then
+        log_msg ERROR "No action specified for non-interactive mode."
+        usage
+        exit 1
+    fi
+
+    # Execute the chosen action
+    handle_locks "$FORCE" || exit 1 # Always check for locks before an action
+
+    case "$ACTION" in
+        full)
+            fix_broken_packages
+            apt_update_resilient
+            run_full_upgrade
+            fix_broken_packages # Run again post-upgrade to fix any new issues
+            clean_system
+            check_kernel_update
+            ;;
+        update)
+            apt_update_resilient
+            ;;
+        clean)
             clean_system
             ;;
-        2)
-            echo -e "\e[1;36mUpdating package list only...\e[0m" | sudo tee -a "$LOGFILE"
-            update_package_list
+        reinstall)
+            reinstall_apt_stack
             ;;
-        3)
-            echo -e "\e[1;36mCleaning the system...\e[0m" | sudo tee -a "$LOGFILE"
-            clean_system
-            ;;
-        4)
-            echo -e "\e[1;32mExiting the script. Goodbye!\e[0m" | sudo tee -a "$LOGFILE"
-            break
+        refresh)
+            refresh_kali_key
             ;;
         *)
-            echo -e "\e[1;31mInvalid choice. Please select a valid option (1-4).\e[0m" | sudo tee -a "$LOGFILE"
+            log_msg ERROR "No valid action was selected or specified."
+            exit 1
             ;;
     esac
-done
+}
 
-# Check if a reboot is required
-if [ -f /var/run/reboot-required ]; then
-    echo -e "\e[1;33mA reboot is required to complete the update.\e[0m" | sudo tee -a "$LOGFILE"
-fi
-
-# Final message with log location
-echo -e "\e[1;33mLog saved to: $LOGFILE\e[0m" | sudo tee -a "$LOGFILE"
-echo -e "--- Update finished on $(date) ---\n" | sudo tee -a "$LOGFILE"
+# Run the main function with all provided arguments
+main "$@"
