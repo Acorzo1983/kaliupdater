@@ -23,7 +23,7 @@ This tool goes beyond a simple script, incorporating features for safe, reliable
 Install the script and make it available system-wide with this one-liner:
 
 ```bash
-wget -O updater.sh https://raw.githubusercontent.com/Acorzo1983/kaliupdater/main/updater.sh && chmod +x updater.sh && sudo mv updater.sh /usr/local/bin/updater
+wget -O updater.sh https://raw.githubusercontent.com/Acorzo1983/kaliupdater/refs/heads/main/updater && chmod +x updater.sh && sudo mv updater.sh /usr/local/bin/updater
 ```
 
 This command will:
@@ -93,7 +93,7 @@ All actions are logged with timestamps and severity levels to `/var/log/kali-upd
 To download, install, and run a full update in one command:
 
 ```bash
-wget -O updater.sh https://raw.githubusercontent.com/Acorzo1983/kaliupdater/main/updater.sh && chmod +x updater.sh && sudo mv updater.sh /usr/local/bin/updater && sudo updater --full
+wget -O updater.sh https://raw.githubusercontent.com/Acorzo1983/kaliupdater/main/updater && chmod +x updater.sh && sudo mv updater.sh /usr/local/bin/updater && sudo updater --full
 ```
 
 ## Contributing
